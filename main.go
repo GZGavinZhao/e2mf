@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"cmp"
 	"debug/elf"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/getsolus/libeopkg/archive"
@@ -79,36 +81,33 @@ func getProvidersAndDepends(r io.ReaderAt) (p []stone1.Dependency, d []stone1.De
 
 	switch file.Type {
 	case elf.ET_DYN:
-		symbols, err := file.DynamicSymbols()
-		if err != nil {
-			return p, d, fmt.Errorf("Failed to get dynamic symbols: %w", err)
-		}
+		// symbols, err := file.DynamicSymbols()
+		// if err != nil {
+		// 	return p, d, fmt.Errorf("Failed to get dynamic symbols: %w", err)
+		// }
+
+		// for _, symbol := range symbols {
+		// 	stBind := elf.ST_BIND(symbol.Info)
+		// 	if (stBind & elf.STB_WEAK) == elf.STB_WEAK {
+		// 		continue
+		// 	}
+		// 	if symbol.Section == elf.SHN_UNDEF {
+		// 		continue
+		// 	}
+		// }
 
 		dynName, err := file.DynString(elf.DT_SONAME)
 		if err != nil {
 			return p, d, fmt.Errorf("Failed to get DT_SONAME: %w", err)
 		}
-		if len(dynName) > 0 {
-			soName := dynName[0]
 
-			for _, symbol := range symbols {
-				stBind := elf.ST_BIND(symbol.Info)
-				if (stBind & elf.STB_WEAK) == elf.STB_WEAK {
-					continue
-				}
-				if symbol.Section == elf.SHN_UNDEF {
-					continue
-				}
-
-				provider := stone1.Dependency{
-					Kind: stone1.SharedLibary,
-					Name: toSonameProvider(soName, file.Machine),
-				}
-				providers[provider.String()] = provider
+		for _, soName := range dynName {
+			provider := stone1.Dependency{
+				Kind: stone1.SharedLibary,
+				Name: toSonameProvider(soName, file.Machine),
 			}
-		} else {
-			// slog.Error("DT_SONAME is empty")
-			// os.Exit(1)
+			slog.Debug("Adding provider", "provider", provider)
+			providers[provider.String()] = provider
 		}
 		fallthrough
 	case elf.ET_EXEC, elf.ET_REL:
@@ -152,6 +151,7 @@ func getProvidersAndDepends(r io.ReaderAt) (p []stone1.Dependency, d []stone1.De
 	p = make([]stone1.Dependency, len(providers))
 	i := 0
 	for _, provider := range providers {
+		fmt.Println(i, provider)
 		p[i] = provider
 		i++
 	}
@@ -229,7 +229,7 @@ func main() {
 		}
 
 		pkg.Files = append(pkg.Files, filepath.Join("/", hdr.Name))
-		// fmt.Println("Scanning", hdr.Name)
+		fmt.Println("Scanning", hdr.Name)
 		// if filepath.Ext(hdr.Name) == ".a" {
 		// 	fmt.Println("Probably static library, skipping...")
 		// 	continue
@@ -237,8 +237,8 @@ func main() {
 
 		var buf bytes.Buffer
 		if _, err := io.Copy(&buf, installTarReader); err != nil {
-
 		}
+
 		provides, depends, err := getProvidersAndDepends(bytes.NewReader(buf.Bytes()))
 		if err != nil {
 			if strings.Contains(err.Error(), "bad magic number") {
@@ -252,10 +252,15 @@ func main() {
 			}
 		}
 
-		pkg.RunDeps = depends
-		pkg.Provides = provides
+		pkg.RunDeps = append(pkg.RunDeps, depends...)
+		pkg.Provides = append(pkg.Provides, provides...)
 		// fmt.Println("File:", hdr.Name, "Providers:", provides, "Depends:", depends)
 	}
+
+	slices.SortFunc(pkg.Provides, func(a, b stone1.Dependency) int { return cmp.Compare(a.String(), b.String()) })
+	pkg.Provides = slices.Compact(pkg.Provides)
+	slices.SortFunc(pkg.RunDeps, func(a, b stone1.Dependency) int { return cmp.Compare(a.String(), b.String()) })
+	pkg.RunDeps = slices.Compact(pkg.RunDeps)
 
 	manifest.Packages = append(manifest.Packages, pkg)
 	if b, err := json.MarshalIndent(manifest, "", "    "); err == nil {
